@@ -1,5 +1,7 @@
 streamlit>=1.38.0
 torch>=2.3.0
+torchvision>=0.18.0
 pillow>=10.0.0
 accelerate>=0.33.0
+pdf2image>=1.17.0
 transformers@git+https://github.com/huggingface/transformers@82a06db03535c49aa987719ed0746a76093b1ec4

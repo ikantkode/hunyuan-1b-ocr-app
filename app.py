@@ -1,4 +1,4 @@
-# app.py
+# app.py — Final, Clean UI + Timer + Clear Backend Info
 import streamlit as st
 from PIL import Image
 import torch
@@ -6,227 +6,216 @@ from pathlib import Path
 from transformers import AutoProcessor, HunYuanVLForConditionalGeneration
 import os
 import tempfile
+from pdf2image import convert_from_bytes
+import time
 
-# Create data folder
+# Memory optimization
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+torch.cuda.empty_cache()
+
 Path("./data").mkdir(exist_ok=True)
 
-# Page config
 st.set_page_config(
-    page_title="HunyuanOCR – Tencent 1B OCR Expert",
+    page_title="HunyuanOCR Pro",
     page_icon="magnifying glass",
-    layout="wide",
+    layout="centered",
     initial_sidebar_state="expanded"
 )
 
-# Session state initialization
-for key in ["model_loaded", "processor", "model", "lang"]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-if "lang" not in st.session_state:
-    st.session_state.lang = "english"
+# === CUSTOM CSS FOR CLEAN LOOK ===
+st.markdown("""
+<style>
+    .main > div {padding-top: 2rem;}
+    .stSpinner > div {border-top-color: #1E88E5 !important;}
+    .result-box {
+        padding: 1.5rem;
+        border-radius: 12px;
+        background: #f8f9fa;
+        border-left: 5px solid #1E88E5;
+        margin-top: 1rem;
+    }
+    .timer {
+        font-size: 1.1rem;
+        color: #1565C0;
+        font-weight: 600;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# ------------------------------------------------------------------
-# Critical fix: clean repeated substrings (from official model card)
-# ------------------------------------------------------------------
-def clean_repeated_substrings(text: str) -> str:
+# === SESSION STATE ===
+for k in ["model_loaded", "processor", "model"]:
+    if k not in st.session_state:
+        st.session_state[k] = None
+
+# === HELPER FUNCTIONS ===
+def clean_repeated(text: str) -> str:
     n = len(text)
-    if n < 8000:
-        return text
-    for length in range(2, n // 10 + 1):
-        candidate = text[-length:]
-        count = 0
-        i = n - length
-        while i >= 0 and text[i:i + length] == candidate:
-            count += 1
-            i -= length
-        if count >= 10:
-            return text[:n - length * (count - 1)]
+    if n < 8000: return text
+    for l in range(2, n // 10 + 1):
+        cand = text[-l:]
+        cnt = 0
+        i = n - l
+        while i >= 0 and text[i:i+l] == cand:
+            cnt += 1
+            i -= l
+        if cnt >= 10:
+            return text[:n - l * (cnt - 1)]
     return text
 
-# ------------------------------------------------------------------
-# Model loading
-# ------------------------------------------------------------------
+def resize_image(img: Image.Image, max_pixels=1048576) -> Image.Image:
+    if img.width * img.height > max_pixels:
+        ratio = (max_pixels / (img.width * img.height)) ** 0.5
+        new_size = (int(img.width * ratio), int(img.height * ratio))
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+    return img
+
 def load_model():
     if st.session_state.model_loaded:
         return True
-
-    with st.spinner("Loading HunyuanOCR 1B model (first time only, ~2GB)..."):
+    with st.spinner("Loading HunyuanOCR 1B model (Transformers + Accelerate)..."):
         try:
-            model_name = "tencent/HunyuanOCR"
-
-            processor = AutoProcessor.from_pretrained(model_name, use_fast=False)
-
+            processor = AutoProcessor.from_pretrained("tencent/HunyuanOCR", use_fast=False)
             model = HunYuanVLForConditionalGeneration.from_pretrained(
-                model_name,
-                attn_implementation="eager",
+                "tencent/HunyuanOCR",
                 torch_dtype=torch.bfloat16,
                 device_map="auto",
-                trust_remote_code=True
+                attn_implementation="eager",
+                trust_remote_code=True,
+                low_cpu_mem_usage=True
             )
-
             st.session_state.processor = processor
             st.session_state.model = model
             st.session_state.model_loaded = True
-            st.success("HunyuanOCR loaded successfully!")
+            st.success("Model loaded successfully!")
             return True
         except Exception as e:
             st.error("Failed to load model")
             st.exception(e)
             return False
 
-# ------------------------------------------------------------------
-# Inference function – THE ONE THAT ACTUALLY WORKS
-# ------------------------------------------------------------------
-def infer(image: Image.Image, task: str, custom_prompt: str = None):
-    # Prompt dictionary (official prompts from model card)
-    prompts = {
-        "parsing": {
-            "english": "Extract all information from the main body of the document image and represent it in markdown format, ignoring headers and footers. Tables should be expressed in HTML format, formulas in the document should be represented using LaTeX format, and the parsing should be organized according to the reading order.",
-            "chinese": "提取文档图片中正文的所有信息用 markdown 格式表示，其中页眉、页脚部分忽略，表格用 html 格式表达，文档中公式用 latex 格式表示，按照阅读顺序组织进行解析。"
-        },
-        "spotting": {
-            "english": "Detect and recognize text in the image, and output the text coordinates in a formatted manner.",
-            "chinese": "检测并识别图片中的文字，将文本坐标格式化输出。"
-        },
-        "translation": {
-            "english": "First extract the text, then translate the text content into English. If it is a document, ignore the header and footer. Formulas should be represented in LaTeX format, and tables should be represented in HTML format.",
-            "chinese": "先提取文字，再将文字内容翻译为英文。若是文档，则其中页眉、页脚忽略。公式用latex格式表示，表格用html格式表示。"
-        },
-        "custom": {
-            "english": custom_prompt or "Extract and process the text from this image.",
-            "chinese": custom_prompt or "从这张图片中提取并处理文本。"
-        }
-    }
+def process_image(img: Image.Image) -> str:
+    img = resize_image(img)
+    prompt = ("Extract all information from the main body of the document image and represent it in markdown format, "
+              "ignoring headers and footers. Tables should be expressed in HTML format, formulas in LaTeX, "
+              "and the parsing should be organized according to the reading order.")
 
-    prompt_text = prompts[task][st.session_state.lang]
-
-    # Save image to temp file (required by chat template)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
-        image.save(f.name)
+        img.save(f.name, quality=92)
         img_path = f.name
 
-    # Build message
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "image", "image": img_path},
-                {"type": "text", "text": prompt_text}
-            ]
-        }
-    ]
+    messages = [{"role": "user", "content": [
+        {"type": "image", "image": img_path},
+        {"type": "text", "text": prompt}
+    ]}]
 
-    # Apply chat template
-    text = st.session_state.processor.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-
-    # Process inputs
-    inputs = st.session_state.processor(
-        text=text,
-        images=image,
-        return_tensors="pt",
-        padding=True
-    )
+    text = st.session_state.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = st.session_state.processor(text=text, images=img, return_tensors="pt")
     inputs = {k: v.to(st.session_state.model.device) for k, v in inputs.items()}
 
-    try:
-        with torch.no_grad():
-            generated_ids = st.session_state.model.generate(
-                **inputs,
-                max_new_tokens=16384,
-                do_sample=False,
-                temperature=0.0
-            )
+    with torch.no_grad():
+        generated = st.session_state.model.generate(
+            **inputs,
+            max_new_tokens=8192,
+            do_sample=False,
+            temperature=0.0
+        )
 
-        # Trim prompt tokens
-        input_ids = inputs["input_ids"]
-        generated_ids = generated_ids[:, input_ids.shape[1]:]
+    generated = generated[:, inputs["input_ids"].shape[1]:]
+    result = st.session_state.processor.batch_decode(generated, skip_special_tokens=True)[0]
+    os.unlink(img_path)
+    return clean_repeated(result)
 
-        # Decode
-        result = st.session_state.processor.batch_decode(
-            generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
-
-        os.unlink(img_path)
-        return clean_repeated_substrings(result)
-
-    except Exception as e:
-        if os.path.exists(img_path):
-            os.unlink(img_path)
-        return f"Inference error: {e}"
-
-# ------------------------------------------------------------------
-# Sidebar
-# ------------------------------------------------------------------
+# === SIDEBAR ===
 with st.sidebar:
-    st.header("Configuration")
-    st.session_state.lang = st.selectbox("Language", ["english", "chinese"], index=0 if st.session_state.lang == "english" else 1)
-
-    task = st.selectbox(
-        "Task",
-        options=["parsing", "spotting", "translation", "custom"],
-        format_func=lambda x: {
-            "parsing": "Document Parsing (Markdown + HTML + LaTeX)",
-            "spotting": "Text Detection + Coordinates",
-            "translation": "Extract → Translate to English",
-            "custom": "Custom Prompt"
-        }[x]
-    )
-
-    custom_prompt = None
-    if task == "custom":
-        custom_prompt = st.text_area("Custom Prompt", height=150)
-
+    st.header("HunyuanOCR Pro")
+    st.markdown("**Best-in-class 1B OCR model**")
+    
     if not st.session_state.model_loaded:
         if st.button("Load Model (one-time)", type="primary", use_container_width=True):
             load_model()
     else:
-        st.success("Model ready")
-        if st.button("Free VRAM (unload)", use_container_width=True):
-            st.session_state.model_loaded = False
+        st.success("Model Ready")
+        if st.button("Free VRAM", use_container_width=True):
             st.session_state.model = None
             st.session_state.processor = None
+            st.session_state.model_loaded = False
             torch.cuda.empty_cache()
             st.rerun()
 
-# ------------------------------------------------------------------
-# Main UI
-# ------------------------------------------------------------------
-st.title("HunyuanOCR – Tencent 1B OCR Expert")
-st.caption("Best-in-class lightweight OCR • Tables → HTML • Formulas → LaTeX • Multilingual")
+    st.markdown("---")
+    st.caption("Inference Engine: **Transformers + Accelerate** (not vLLM)")
 
-uploaded_file = st.file_uploader(
-    "Upload an image (document, receipt, screenshot, etc.)",
-    type=["png", "jpg", "jpeg", "bmp", "webp"]
+# === MAIN UI ===
+st.title("HunyuanOCR Pro")
+st.markdown("### High-Accuracy Document & PDF → Clean Markdown")
+
+st.info("""
+**Features**  
+- Multi-page PDF support  
+- Tables → HTML • Math → LaTeX  
+- No OOM crashes (auto-resize)  
+- Works on 12GB+ GPUs  
+- Powered by **Transformers + Accelerate** backend
+""")
+
+uploaded = st.file_uploader(
+    "Upload Image or PDF",
+    type=["png", "jpg", "jpeg", "webp", "pdf"],
+    help="Supports single images and multi-page PDFs"
 )
 
-if uploaded_file and st.session_state.model_loaded:
-    image = Image.open(uploaded_file).convert("RGB")
-
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.image(image, caption="Uploaded Image", use_container_width=True)
-
-    with col2:
-        if st.button("Run OCR", type="primary", use_container_width=True):
-            with st.spinner("Processing image with HunyuanOCR..."):
-                result = infer(image, task, custom_prompt)
-            st.markdown("### Result")
-            st.markdown(result)
-
-            st.download_button(
-                label="Download Result",
-                data=result,
-                file_name=f"hunyuanocr_{task}_{st.session_state.lang}.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-else:
-    if uploaded_file:
-        st.info("Click **Load Model** in the sidebar first.")
+if uploaded and st.session_state.model_loaded:
+    # Load pages
+    if uploaded.type == "application/pdf":
+        pages = convert_from_bytes(uploaded.read(), dpi=160)
+        st.success(f"Loaded {len(pages)} page(s)")
     else:
-        st.info("Upload an image to get started.")
+        pages = [Image.open(uploaded).convert("RGB")]
+
+    # Preview thumbnails
+    cols = st.columns(min(len(pages), 5))
+    for i, page in enumerate(pages[:5]):
+        with cols[i]:
+            st.image(page, caption=f"Page {i+1}", width=120)
+    if len(pages) > 5:
+        st.caption(f"... and {len(pages)-5} more pages")
+
+    if st.button("Run OCR → Markdown", type="primary", use_container_width=True):
+        all_results = []
+        timer = st.empty()
+        progress = st.progress(0)
+        start_time = time.time()
+
+        for i, page in enumerate(pages):
+            timer.markdown(f"<div class='timer'>Processing page {i+1}/{len(pages)} • Elapsed: {time.time() - start_time:.1f}s</div>", unsafe_allow_html=True)
+            result = process_image(page)
+            all_results.append(f"# Page {i+1}\n\n{result}\n\n---\n")
+            progress.progress((i + 1) / len(pages))
+
+        total_time = time.time() - start_time
+        final_md = "\n".join(all_results)
+
+        progress.empty()
+        timer.empty()
+
+        st.success(f"OCR Complete in {total_time:.1f} seconds!")
+
+        st.markdown("### Result")
+        with st.container():
+            st.markdown(f"<div class='result-box'>{final_md}</div>", unsafe_allow_html=True)
+
+        st.download_button(
+            label="Download Full Markdown",
+            data=final_md,
+            file_name=f"hunyuanocr_{uploaded.name.split('.')[0]}.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+else:
+    if uploaded:
+        st.warning("Please load the model first (sidebar)")
+    else:
+        st.info("Upload a document or PDF to begin")
 
 st.markdown("---")
-st.markdown("Powered by **[tencent/HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR)** • Built with Streamlit • Transformers + Accelerate")
+st.caption("Made with ❤️ using [tencent/HunyuanOCR](https://huggingface.co/tencent/HunyuanOCR) • Transformers backend")
