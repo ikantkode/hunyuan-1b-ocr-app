@@ -27,9 +27,14 @@ accelerate>=0.33.0
 transformers@git+https://github.com/huggingface/transformers@82a06db03535c49aa987719ed0746a76093b1ec4
 ```
 
+- Docker (optional, for GPU deployment)
+- NVIDIA GPU + CUDA 12+ (optional for Docker GPU deployment)
+
 ---
 
 ## Setup & Deployment
+
+### Local Python Deployment
 
 1. **Clone the repository**:
 
@@ -58,7 +63,26 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-5. **Load the model** from the sidebar (first-time setup may take a few minutes) and upload an image to start OCR.
+5. **Load the model** from the sidebar and upload an image to start OCR.
+
+
+### Docker Deployment (GPU Optimized)
+
+1. **Build the Docker image**:
+
+```bash
+docker-compose build
+```
+
+2. **Start the container**:
+
+```bash
+docker-compose up -d
+```
+
+3. **Access the app** in your browser at `http://localhost:8501`
+
+> Note: The Docker setup requires an NVIDIA GPU with CUDA support and the NVIDIA Container Toolkit installed.
 
 ---
 
@@ -68,6 +92,8 @@ streamlit run app.py
 hunyuan-ocr-app/
 ├── app.py                # Main Streamlit app
 ├── requirements.txt      # Python dependencies
+├── Dockerfile            # GPU-optimized container setup
+├── docker-compose.yml    # Docker Compose config
 ├── data/                 # Stores temporary files
 └── hOCR/                 # (Optional) Additional project files, ignored in git
 ```
