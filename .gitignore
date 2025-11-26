@@ -1,2 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.env
 venv/
+env/
+
+# Data folders
+data/
+cache/
 hOCR/
+
+# Docker
+*.log
+docker-compose.override.yml
+.docker/
+*.tar
+*.img
+*.tmp
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Streamlit cache
+.streamlit/

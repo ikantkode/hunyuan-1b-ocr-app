@@ -1,0 +1,32 @@
+# docker-compose.yml — Ready for local & server deployment
+version: "3.9"
+
+services:
+  hunyuanocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hunyuanocr-pro
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: '2gb'
+    volumes:
+      - ./data:/app/data
+      - ./cache:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
